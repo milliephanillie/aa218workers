@@ -1,4 +1,4 @@
-name = "aa218-worker"
+name = 'aa218-workers'
 main = "src/worker.js"
 compatibility_date = "2024-10-01"
 # Optional if you want to bind to a route right away:
