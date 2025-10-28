@@ -7,7 +7,7 @@ A Cloudflare Worker that provides authentication and API proxy functionality for
 This project consists of three main components:
 
 - **`worker.js`** - Main Cloudflare Worker that handles routing, authentication, and proxying
-- **`TecBaseApi.js`** - API client for communicating with Azure Functions
+- **`TecBaseApi.js`** - API client for communicating alongside Azure Functions
 - **`TecCookie.js`** - Cookie management utility for session handling
 
 ## Features
