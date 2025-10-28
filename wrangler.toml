@@ -1,0 +1,8 @@
+name = "aa218-worker"
+main = "src/worker.js"
+compatibility_date = "2024-10-01"
+# Optional if you want to bind to a route right away:
+# routes = [
+#   { pattern = "aa218.club/api/*", zone_name = "aa218.club" },
+#   { pattern = "www.aa218.club/api/*", zone_name = "aa218.club" }
+# ]
