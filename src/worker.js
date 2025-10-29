@@ -23,9 +23,9 @@ function cors(origin) {
   };
 }
 
-function hasCookie(request) {
+function hasCookie(request, cookieName = 'aa218_ok') {
   const c = request.headers.get('Cookie') || '';
-  return c.split(/;\s*/).some(p => p.startsWith('aa218_ok='));
+  return c.split(/;\s*/).some(p => p.startsWith(cookieName + '='));
 }
 
 function stripParam(u, key) {
@@ -58,11 +58,37 @@ function buildArgs(request, url) {
   };
 }
 
-function isPass(res) {
-  if (!res) return false;
-  if (res.ok === false) return false;
-  if (typeof res.status === 'number' && (res.status < 200 || res.status >= 300)) return false;
+// Treat any 2xx from Azure as PASS. If your function returns a JSON {ok:true/false},
+// you can tighten this to check that explicitly.
+function isPass(resp) {
+  if (!resp) return false;
+  if (typeof resp.status === 'number') return resp.status >= 200 && resp.status < 300;
+  if (resp.ok === false) return false;
   return true;
+}
+
+// Robust request body parser: JSON and form-encoded supported.
+async function parseBody(request) {
+  const ctype = (request.headers.get('content-type') || '').toLowerCase();
+  const raw = await request.text();
+
+  if (!raw || !raw.trim()) return {};
+
+  // JSON path
+  if (ctype.includes('application/json')) {
+    try { return JSON.parse(raw); } catch { return {}; }
+  }
+
+  // x-www-form-urlencoded path
+  if (ctype.includes('application/x-www-form-urlencoded')) {
+    const params = new URLSearchParams(raw);
+    const out = {};
+    for (const [k, v] of params.entries()) out[k] = v;
+    return out;
+  }
+
+  // Last-ditch: try JSON anyway
+  try { return JSON.parse(raw); } catch { return {}; }
 }
 
 export default {
@@ -71,50 +97,87 @@ export default {
     const origin = request.headers.get('Origin') || '';
     const azure = new TecBaseApi({ functionsKey: env.AZ_FUNCTION_KEY });
 
-    // CORS preflight for any /api/* endpoint
+    // CORS preflight for /api/*
     if (url.pathname.startsWith('/api/') && request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: { ...cors(origin), 'Cache-Control': 'no-store' } });
+      return new Response(null, {
+        status: 204,
+        headers: { ...cors(origin), 'Cache-Control': 'no-store' }
+      });
     }
 
-    // Explicit login via POST -> Azure validates; on success set cookie
+    // ---------------------------
+    // TEST OVERRIDES (exact spec)
+    // ---------------------------
+    const authParam = url.searchParams.get('auth');
+    if (authParam === 'test-true') {
+      // Set cookie and strip param; do NOT redirect to password
+      const headers = new Headers({ 'Cache-Control': 'no-store', ...cors(origin) });
+      headers.set('Set-Cookie', SESSION.set('1'));
+      headers.set('Location', stripParam(url.toString(), 'auth'));
+      return new Response(null, { status: 302, headers });
+    }
+    if (authParam === 'test-false') {
+      // Clear cookie and force redirect to password
+      const headers = new Headers({ 'Cache-Control': 'no-store', ...cors(origin) });
+      headers.set('Set-Cookie', SESSION.clear());
+      headers.set('Location', `${url.origin}/password.html`);
+      return new Response(null, { status: 302, headers });
+    }
+
+    // ---------------------------
+    // API: LOGIN (Azure decides)
+    // ---------------------------
     if (url.pathname === '/api/login' && request.method === 'POST') {
-      const h = new Headers({ 'Content-Type': 'application/json', ...cors(origin), 'Cache-Control': 'no-store' });
+      const headers = new Headers({
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...cors(origin)
+      });
+
       try {
-        const body = await request.json();
-        const pw = String(body?.password || '').trim();
-        if (!pw) return new Response(JSON.stringify({ ok: false, message: 'Password is required' }), { status: 400, headers: h });
+        const body = await parseBody(request);
+        const submittedPassword = (body.password || '').toString().trim();
 
-        const args = buildArgs(request, url);
-        args.submittedPassword = pw;
-
-        const resp = await azure.get('pingfn', { queryString: args });
-        if (!isPass(resp)) {
-          return new Response(JSON.stringify({ ok: false, message: 'Invalid password' }), { status: 401, headers: h });
+        if (!submittedPassword) {
+          return new Response(JSON.stringify({ ok: false, message: 'Password is required' }), { status: 400, headers });
         }
 
-        h.set('Set-Cookie', SESSION.set('1'));
-        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: h });
-      } catch {
-        return new Response(JSON.stringify({ ok: false, message: 'Invalid request format' }), { status: 400, headers: h });
+        const args = buildArgs(request, url);
+        args.submittedPassword = submittedPassword;
+
+        const resp = await azure.get('pingfn', { queryString: args });
+
+        if (!isPass(resp)) {
+          return new Response(JSON.stringify({ ok: false, message: 'Invalid password' }), { status: 401, headers });
+        }
+
+        headers.set('Set-Cookie', SESSION.set('1'));
+        return new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), { status: 200, headers });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, message: 'Invalid request format' }), { status: 400, headers });
       }
     }
 
-    // Logout clears cookie
+    // ---------------------------
+    // API: LOGOUT (clear cookie)
+    // ---------------------------
     if (url.pathname === '/api/logout') {
-      const h = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
-      h.set('Set-Cookie', SESSION.clear());
-      return new Response(null, { status: 204, headers: h });
+      const headers = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
+      headers.set('Set-Cookie', SESSION.clear());
+      return new Response(null, { status: 204, headers });
     }
 
-    // Generic proxy to Azure for other /api/* calls
+    // ---------------------------
+    // API: Proxy to Azure
+    // ---------------------------
     if (url.pathname.startsWith('/api/')) {
       const path = url.pathname.replace(/^\/api\//, '');
-      let resp;
+      let proxied;
       if (request.method === 'GET') {
-        resp = await azure.get(path, { queryString: url.search.slice(1) });
+        proxied = await azure.get(path, { queryString: url.search.slice(1) });
       } else if (request.method === 'POST') {
         const buf = await request.arrayBuffer();
-        resp = await azure.post(path, {
+        proxied = await azure.post(path, {
           queryString: url.search.slice(1),
           body: buf,
           headers: { 'content-type': request.headers.get('content-type') || 'application/json' }
@@ -122,60 +185,47 @@ export default {
       } else {
         return new Response('Method Not Allowed', { status: 405, headers: { ...cors(origin) } });
       }
+
       const headers = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
-      const ct = resp.headers?.get?.('content-type');
-      if (ct) headers.set('content-type', ct);
-      const data = resp.data ?? resp.raw ?? '';
-      return new Response(typeof data === 'string' ? data : JSON.stringify(data), { status: resp.status || (resp.ok ? 200 : 502), headers });
+      const ct = proxied.headers?.get?.('content-type');
+      if (ct) headers.set('Content-Type', ct);
+      const data = proxied.data ?? proxied.raw ?? '';
+      return new Response(typeof data === 'string' ? data : JSON.stringify(data), {
+        status: proxied.status || (proxied.ok ? 200 : 502),
+        headers
+      });
     }
 
-    // Public password page
+    // Public password page always passes
     if (url.pathname === '/password.html' || url.pathname.startsWith('/password/')) {
       const upstream = await fetch(request);
       const r = new Response(upstream.body, upstream);
       r.headers.set('Cache-Control', 'private, no-store');
-      r.headers.set('x-aa218-worker', 'password-page');
       return r;
     }
 
-    // Test overrides
-    const auth = url.searchParams.get('auth');
-    if (auth === 'test-true') {
-      const h = new Headers({ 'Cache-Control': 'no-store', 'x-aa218-worker': 'auth-test-true' });
-      h.set('Set-Cookie', SESSION.set('1'));
-      h.set('Location', stripParam(url.toString(), 'auth'));
-      return new Response(null, { status: 302, headers: h });
-    }
-    if (auth === 'test-false') {
-      const h = new Headers({ 'Cache-Control': 'no-store', 'x-aa218-worker': 'auth-test-false' });
-      h.set('Set-Cookie', SESSION.clear());
-      h.set('Location', `${url.origin}/password.html`);
-      return new Response(null, { status: 302, headers: h });
-    }
-
-    // If session cookie exists, allow directly
+    // If session cookie is present → allow
     if (hasCookie(request)) {
       const upstream = await fetch(request);
       const r = new Response(upstream.body, upstream);
       r.headers.set('Cache-Control', 'private, no-store');
-      r.headers.set('x-aa218-worker', 'session-ok');
       return r;
     }
 
-    // No cookie -> ask Azure if this request should pass
-    const args = buildArgs(request, url);
-    const gate = await azure.get('pingfn', { queryString: args });
-    if (isPass(gate)) {
+    // No cookie → ask Azure gate
+    const gateArgs = buildArgs(request, url);
+    const gateResp = await azure.get('pingfn', { queryString: gateArgs });
+    if (isPass(gateResp)) {
       const upstream = await fetch(request);
       const r = new Response(upstream.body, upstream);
       r.headers.set('Cache-Control', 'private, no-store');
-      r.headers.set('x-aa218-worker', 'azure-allow');
       return r;
     }
 
+    // Default: redirect to password
     return new Response(null, {
       status: 302,
-      headers: { 'Location': `${url.origin}/password.html`, 'Cache-Control': 'no-store', 'x-aa218-worker': 'redirect-password' }
+      headers: { 'Location': `${url.origin}/password.html`, 'Cache-Control': 'no-store' }
     });
   }
 };
