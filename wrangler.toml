@@ -1,16 +1,17 @@
-name = 'aa218-workers'
+name = "aa218-workers"
 main = "src/worker.js"
 compatibility_date = "2024-10-01"
 
-[observability]
-[observability.logs]
-enabled = true
-head_sampling_rate = 1
-invocation_logs = true
-persist = true
-
-# Routes to bind the worker to your domain:
 routes = [
-  { pattern = "aa218.club/*", zone_name = "aa218.club" },
-  { pattern = "www.aa218.club/*", zone_name = "aa218.club" }
+  { pattern = "aa218.club/*" },
+  { pattern = "www.aa218.club/*" }
 ]
+
+[observability]
+  head_sampling_rate = 1
+  [observability.logs]
+    enabled = true
+    head_sampling_rate = 1
+    invocation_logs = true
+    persist = true
+
