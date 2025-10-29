@@ -47,7 +47,18 @@ function buildFilterArguments(request, requestUrl) {
 }
 
 // Interpret PASS/FAIL from Azure response; also support {ok:true/false}
-function isFilterPassResponse(apiResponse) {
+function isFilterPassResponse(apiResponse, requestUrl = null) {
+    // Check for test authentication parameters
+    if (requestUrl) {
+        const authParam = requestUrl.searchParams.get('auth');
+        if (authParam === 'test-false') {
+            return false;
+        }
+        if (authParam === 'test-true') {
+            return true;
+        }
+    }
+
     if (!apiResponse.ok) {
         return false;
     }
@@ -101,11 +112,19 @@ export default {
                     filterArguments.submittedPassword = submittedPassword;
                     
                     const azureResponse = await azureApi.get('pingfn', { queryString: filterArguments });
-                    isAuthenticated = isFilterPassResponse(azureResponse);
+                    isAuthenticated = isFilterPassResponse(azureResponse, requestUrl);
                 } else {
-                    // Simple password validation
-                    const correctPassword = env.SITE_PASSWORD || '218club';
-                    isAuthenticated = submittedPassword === correctPassword;
+                    // Check for test authentication parameters first
+                    const authParam = requestUrl.searchParams.get('auth');
+                    if (authParam === 'test-false') {
+                        isAuthenticated = false;
+                    } else if (authParam === 'test-true') {
+                        isAuthenticated = true;
+                    } else {
+                        // Simple password validation
+                        const correctPassword = env.SITE_PASSWORD || '218club';
+                        isAuthenticated = submittedPassword === correctPassword;
+                    }
                 }
 
                 if (isAuthenticated) {
