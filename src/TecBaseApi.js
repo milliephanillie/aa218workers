@@ -1,59 +1,41 @@
 export class TecBaseApi {
-    static METHODS = ['GET', 'POST'];
-    static BASE_API_URL = 'https://218functionapp-c5ctf2ggfjcwdbax.centralus-01.azurewebsites.net';
+  constructor({ functionsKey, baseUrl } = {}) {
+    if (!functionsKey) throw new Error('Missing Azure Functions key');
+    if (!baseUrl) throw new Error('Missing Azure Functions baseUrl');
+    this.functionsKey = functionsKey;
+    this.baseUrl = new URL(baseUrl);
+  }
 
-    constructor({ functionsKey }) {
-        this.functionsKey = functionsKey;
-        this.baseUrl = new URL(TecBaseApi.BASE_API_URL);
+  buildUrl(path, query) {
+    const url = new URL(`/api/${String(path).replace(/^\/+/, '')}`, this.baseUrl);
+    if (typeof query === 'string' && query.trim()) {
+      const s = query.startsWith('?') ? query.slice(1) : query;
+      new URLSearchParams(s).forEach((v, k) => url.searchParams.set(k, v));
+    } else if (query && typeof query === 'object') {
+      Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, v ?? ''));
     }
+    url.searchParams.set('code', this.functionsKey);
+    return url.toString();
+  }
 
-    requireKey() {
-        if (!this.functionsKey) {
-            throw new Error('Missing Azure Functions key');
-        }
+  async _request(method, path, { queryString, body, headers = {}, timeoutMs = 15000 } = {}) {
+    const url = this.buildUrl(path, queryString);
+    const h = new Headers(headers);
+    if (method === 'POST' && !h.get('content-type')) h.set('content-type', 'application/json');
+    h.set('x-functions-key', this.functionsKey);
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
+    let resp;
+    try { resp = await fetch(url, { method, headers: h, body, signal: ctrl.signal }); } finally { clearTimeout(t); }
+    const text = await resp.text();
+    let json = null; try { json = text ? JSON.parse(text) : null; } catch {}
+    if (resp.status === 404 || resp.status === 405) {
+      const err = new Error(`HTTP ${resp.status}`);
+      err.status = resp.status; err.data = json ?? text; err.headers = resp.headers; throw err;
     }
+    return { status: resp.status, ok: resp.ok, data: json, raw: text, headers: resp.headers };
+  }
 
-    buildUrl(path, queryString) {
-        const targetUrl = new URL(`/api/${path.replace(/^\/+/, '')}`, this.baseUrl);
-        if (queryString && typeof queryString === 'string') {
-            targetUrl.search = queryString.startsWith('?') ? queryString : `?${queryString}`;
-        } else if (queryString && typeof queryString === 'object') {
-            Object.entries(queryString).forEach(([key, value]) => targetUrl.searchParams.set(key, value ?? ''));
-        }
-        return targetUrl.toString();
-    }
-
-    async get(path, { queryString, headers = {} } = {}) {
-        this.requireKey();
-        const response = await fetch(this.buildUrl(path, queryString), {
-            method: 'GET',
-            headers: { ...headers, 'x-functions-key': this.functionsKey }
-        });
-        const responseText = await response.text();
-        let parsedData = null;
-        try {
-            parsedData = responseText ? JSON.parse(responseText) : null;
-        } catch {
-            // Ignore parse errors
-        }
-        return { status: response.status, ok: response.ok, data: parsedData, raw: responseText, headers: response.headers };
-    }
-
-    async post(path, { queryString, body, headers = {} } = {}) {
-        this.requireKey();
-        const requestHeaders = new Headers(headers);
-        if (!requestHeaders.get('content-type')) {
-            requestHeaders.set('content-type', 'application/json');
-        }
-        requestHeaders.set('x-functions-key', this.functionsKey);
-        const response = await fetch(this.buildUrl(path, queryString), { method: 'POST', headers: requestHeaders, body });
-        const responseText = await response.text();
-        let parsedData = null;
-        try {
-            parsedData = responseText ? JSON.parse(responseText) : null;
-        } catch {
-            // Ignore parse errors
-        }
-        return { status: response.status, ok: response.ok, data: parsedData, raw: responseText, headers: response.headers };
-    }
+  get(path, opts = {})  { return this._request('GET',  path, opts); }
+  post(path, opts = {}) { return this._request('POST', path, opts); }
 }

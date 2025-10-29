@@ -1,73 +1,32 @@
 export class TecCookie {
-    constructor({
-        name,
-        maxAge = 0,
-        path = '/',
-        domain = '',
-        secure = true,
-        httpOnly = true,
-        sameSite = 'Lax'
-    } = {}) {
-        this.name = name;
-        this.maxAge = maxAge;
-        this.path = path;
-        this.domain = domain;
-        this.secure = secure;
-        this.httpOnly = httpOnly;
-        this.sameSite = sameSite;
+  constructor({ name, maxAge = 0, path = '/', domain = '', secure = true, httpOnly = true, sameSite = 'Lax' } = {}) {
+    this.name = name; this.maxAge = maxAge; this.path = path; this.domain = domain;
+    this.secure = secure; this.httpOnly = httpOnly; this.sameSite = sameSite;
+  }
+
+  parse(request) {
+    const raw = request.headers.get('Cookie') || '';
+    const out = {};
+    for (const part of raw.split(';')) {
+      const [n, ...v] = part.trim().split('=');
+      if (n) out[n] = decodeURIComponent(v.join('='));
     }
+    return out;
+  }
 
-    parse(request) {
-        const rawCookieString = request.headers.get('Cookie') || '';
-        const parsedCookies = {};
-        for (const cookiePart of rawCookieString.split(';')) {
-            const [cookieName, ...cookieValueParts] = cookiePart.trim().split('=');
-            if (cookieName) {
-                parsedCookies[cookieName] = decodeURIComponent(cookieValueParts.join('='));
-            }
-        }
-        return parsedCookies;
-    }
+  has(request) { return this.parse(request)[this.name] != null; }
 
-    has(request) {
-        return this.parse(request)[this.name] != null;
-    }
+  build(value, { maxAge = this.maxAge } = {}) {
+    const parts = [`${this.name}=${encodeURIComponent(value)}`, `Path=${this.path}`];
+    if (this.domain) parts.push(`Domain=${this.domain}`);
+    if (maxAge > 0) { parts.push(`Max-Age=${maxAge}`); parts.push(`Expires=${new Date(Date.now() + maxAge * 1000).toUTCString()}`); }
+    if (maxAge === 0) { parts.push('Max-Age=0'); parts.push('Expires=Thu, 01 Jan 1970 00:00:00 GMT'); }
+    if (this.secure) parts.push('Secure');
+    if (this.httpOnly) parts.push('HttpOnly');
+    if (this.sameSite) parts.push(`SameSite=${this.sameSite}`);
+    return parts.join('; ');
+  }
 
-    build(cookieValue, { maxAge = this.maxAge } = {}) {
-        const cookieParts = [
-            `${this.name}=${encodeURIComponent(cookieValue)}`,
-            `Path=${this.path}`
-        ];
-
-        if (this.domain) {
-            cookieParts.push(`Domain=${this.domain}`);
-        }
-
-        if (maxAge > 0) {
-            cookieParts.push(`Max-Age=${maxAge}`);
-            cookieParts.push(`Expires=${new Date(Date.now() + maxAge * 1000).toUTCString()}`);
-        }
-
-        if (this.secure) {
-            cookieParts.push('Secure');
-        }
-
-        if (this.httpOnly) {
-            cookieParts.push('HttpOnly');
-        }
-
-        if (this.sameSite) {
-            cookieParts.push(`SameSite=${this.sameSite}`);
-        }
-
-        return cookieParts.join('; ');
-    }
-
-    set(cookieValue = '1', options) {
-        return this.build(cookieValue, options);
-    }
-
-    clear() {
-        return this.build('', { maxAge: 0 });
-    }
+  set(value = '1', options) { return this.build(value, options); }
+  clear() { return this.build('', { maxAge: 0 }); }
 }
