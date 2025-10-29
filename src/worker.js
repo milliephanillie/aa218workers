@@ -47,13 +47,14 @@ function buildFilterArguments(request, requestUrl) {
 }
 
 // Interpret PASS/FAIL from Azure response; also support {ok:true/false}
-function isPass(apiResponse) {
+function isFilterPassResponse(apiResponse) {
     if (!apiResponse.ok) {
         return false;
     }
 
-    // for now we just want to hardcode true as the return value
-    return true;
+    // For now we don't know of any other than the response status code
+
+    return true; // just hardcode to pass for now
 }
 
 export default {
@@ -67,22 +68,74 @@ export default {
             return new Response(null, { status: 204, headers: createCorsHeaders(requestOrigin) });
         }
 
-        // Login: browser POSTs here; Worker calls Azure (GET with query args), sets cookie on PASS
+        // Login: browser POSTs password here; Worker validates and sets cookie on success
         if (requestUrl.pathname === '/api/login' && request.method === 'POST') {
-            const filterArguments = buildFilterArguments(request, requestUrl);
-            const azureResponse = await azureApi.get('pingfn', { queryString: filterArguments });
             const responseHeaders = new Headers({
                 'Content-Type': 'application/json',
                 'Cache-Control': 'no-store',
                 ...createCorsHeaders(requestOrigin)
             });
-            const isAuthenticated = isPass(azureResponse);
-            if (isAuthenticated) {
-                responseHeaders.set('Set-Cookie', SESSION.set('1'));
+
+            try {
+                const loginData = await request.json();
+                const submittedPassword = loginData?.password?.trim();
+
+                if (!submittedPassword) {
+                    return new Response(JSON.stringify({
+                        ok: false,
+                        message: 'Password is required'
+                    }), {
+                        status: 400,
+                        headers: responseHeaders
+                    });
+                }
+
+                // Check if we should use Azure validation or local password
+                const useAzureValidation = env.USE_AZURE_AUTH === 'true';
+                let isAuthenticated = false;
+
+                if (useAzureValidation) {
+                    // Use Azure Function for validation (original behavior)
+                    const filterArguments = buildFilterArguments(request, requestUrl);
+                    // Add password to the filter arguments
+                    filterArguments.submittedPassword = submittedPassword;
+                    
+                    const azureResponse = await azureApi.get('pingfn', { queryString: filterArguments });
+                    isAuthenticated = isFilterPassResponse(azureResponse);
+                } else {
+                    // Simple password validation
+                    const correctPassword = env.SITE_PASSWORD || '218club';
+                    isAuthenticated = submittedPassword === correctPassword;
+                }
+
+                if (isAuthenticated) {
+                    responseHeaders.set('Set-Cookie', SESSION.set('1'));
+                    return new Response(JSON.stringify({
+                        ok: true,
+                        message: 'Authentication successful',
+                        timestamp: new Date().toISOString()
+                    }), { 
+                        status: 200, 
+                        headers: responseHeaders 
+                    });
+                } else {
+                    return new Response(JSON.stringify({
+                        ok: false,
+                        message: 'Invalid password',
+                        timestamp: new Date().toISOString()
+                    }), { 
+                        status: 401, 
+                        headers: responseHeaders 
+                    });
+                }            } catch (parseError) {
+                return new Response(JSON.stringify({
+                    ok: false,
+                    message: 'Invalid request format'
+                }), {
+                    status: 400,
+                    headers: responseHeaders
+                });
             }
-            const responseBody = azureResponse.data ?? azureResponse.raw ?? '';
-            const loginResult = typeof responseBody === 'string' ? { ok: isAuthenticated, body: responseBody } : { ok: isAuthenticated, ...responseBody };
-            return new Response(JSON.stringify(loginResult), { status: isAuthenticated ? 200 : 401, headers: responseHeaders });
         }
 
         // Logout: clear cookie
