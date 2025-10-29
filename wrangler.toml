@@ -1,8 +1,16 @@
 name = 'aa218-workers'
 main = "src/worker.js"
 compatibility_date = "2024-10-01"
-# Optional if you want to bind to a route right away:
-# routes = [
-#   { pattern = "aa218.club/api/*", zone_name = "aa218.club" },
-#   { pattern = "www.aa218.club/api/*", zone_name = "aa218.club" }
-# ]
+
+[observability]
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+# Routes to bind the worker to your domain:
+routes = [
+  { pattern = "aa218.club/*", zone_name = "aa218.club" },
+  { pattern = "www.aa218.club/*", zone_name = "aa218.club" }
+]
