@@ -12,8 +12,8 @@ const SESSION = new TecCookie({
 
 const ALLOWED_ORIGINS = ['https://aa218.club', 'https://www.aa218.club'];
 
-function createCorsHeaders(requestOrigin) {
-  const allowedOrigin = ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '';
+function createCorsHeaders(origin) {
+  const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : '';
   return {
     'Access-Control-Allow-Origin': allowedOrigin,
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
@@ -28,97 +28,113 @@ function hasSessionCookie(request, name = 'aa218_ok') {
   return cookie.split(/;\s*/).some(c => c.startsWith(`${name}=`));
 }
 
-function buildFilterArguments(request, requestUrl) {
+function buildFilterArguments(request, url) {
   return {
     clientRequestDateTime: new Date().toISOString(),
     visitorRemoteAddr: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || '',
     visitorUserAgent: request.headers.get('User-Agent') || '',
-    visitorQueryString: requestUrl.search.slice(1),
-    visitorRequestAsset: requestUrl.pathname,
+    visitorQueryString: url.search.slice(1),
+    visitorRequestAsset: url.pathname,
     visitorAccept: request.headers.get('Accept') || '',
     visitorAcceptEncoding: request.headers.get('Accept-Encoding') || '',
     visitorAcceptLanguage: request.headers.get('Accept-Language') || '',
     visitorReqMethod: request.method,
     visitorReferer: request.headers.get('Referer') || '',
-    clientVar1: requestUrl.searchParams.get('cv1') || '',
-    clientVar2: requestUrl.searchParams.get('cv2') || '',
-    clientVar3: requestUrl.searchParams.get('cv3') || '',
-    clientVar4: requestUrl.searchParams.get('cv4') || '',
-    clientVar5: requestUrl.searchParams.get('cv5') || '',
-    clientVar6: requestUrl.searchParams.get('cv6') || '',
+    clientVar1: url.searchParams.get('cv1') || '',
+    clientVar2: url.searchParams.get('cv2') || '',
+    clientVar3: url.searchParams.get('cv3') || '',
+    clientVar4: url.searchParams.get('cv4') || '',
+    clientVar5: url.searchParams.get('cv5') || '',
+    clientVar6: url.searchParams.get('cv6') || '',
     platform: 'worker',
     major_version: '1',
     minor_version: '0'
   };
 }
 
-function isFilterPassResponse(apiResponse) {
-  if (!apiResponse || apiResponse.ok === false) return false;
+function isFilterPassResponse(r) {
+  if (!r || r.ok === false) return false;
   return true;
+}
+
+function stripParam(url, key) {
+  const u = new URL(url);
+  u.searchParams.delete(key);
+  return u.toString();
 }
 
 export default {
   async fetch(request, env) {
-    const requestUrl = new URL(request.url);
-    const requestOrigin = request.headers.get('Origin') || '';
+    const url = new URL(request.url);
+    const origin = request.headers.get('Origin') || '';
     const azureApi = new TecBaseApi({ functionsKey: env.AZ_FUNCTION_KEY });
 
-    if (requestUrl.pathname.startsWith('/api/') && request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: { ...createCorsHeaders(requestOrigin), 'x-aa218-worker': 'preflight' } });
+    if (url.pathname.startsWith('/api/') && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: { ...createCorsHeaders(origin), 'x-aa218-worker': 'preflight' } });
     }
 
-    if (requestUrl.pathname === '/api/login' && request.method === 'POST') {
-      const responseHeaders = new Headers({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...createCorsHeaders(requestOrigin), 'x-aa218-worker': 'login' });
+    if (url.pathname === '/api/login' && request.method === 'POST') {
+      const headers = new Headers({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...createCorsHeaders(origin), 'x-aa218-worker': 'login' });
       try {
-        const loginData = await request.json();
-        const submittedPassword = loginData?.password?.trim();
-        if (!submittedPassword) {
-          return new Response(JSON.stringify({ ok: false, message: 'Password is required' }), { status: 400, headers: responseHeaders });
-        }
-        const useAzureValidation = env.USE_AZURE_AUTH === 'true';
-        let isAuthenticated = false;
-        if (useAzureValidation) {
-          const args = buildFilterArguments(request, requestUrl);
+        const body = await request.json();
+        const submittedPassword = body?.password?.trim();
+        if (!submittedPassword) return new Response(JSON.stringify({ ok: false, message: 'Password is required' }), { status: 400, headers });
+        const useAzure = env.USE_AZURE_AUTH === 'true';
+        let ok = false;
+        if (useAzure) {
+          const args = buildFilterArguments(request, url);
           args.submittedPassword = submittedPassword;
-          const azureResponse = await azureApi.get('pingfn', { queryString: args });
-          isAuthenticated = isFilterPassResponse(azureResponse);
+          const ar = await azureApi.get('pingfn', { queryString: args });
+          ok = isFilterPassResponse(ar);
         } else {
-          const correctPassword = env.SITE_PASSWORD || '218club';
-          isAuthenticated = submittedPassword === correctPassword;
+          ok = submittedPassword === (env.SITE_PASSWORD || '218club');
         }
-        if (isAuthenticated) {
-          responseHeaders.set('Set-Cookie', SESSION.set('1'));
-          return new Response(JSON.stringify({ ok: true, message: 'Authentication successful', timestamp: new Date().toISOString() }), { status: 200, headers: responseHeaders });
+        if (ok) {
+          headers.set('Set-Cookie', SESSION.set('1'));
+          return new Response(JSON.stringify({ ok: true, message: 'Authentication successful', ts: new Date().toISOString() }), { status: 200, headers });
         }
-        return new Response(JSON.stringify({ ok: false, message: 'Invalid password', timestamp: new Date().toISOString() }), { status: 401, headers: responseHeaders });
+        return new Response(JSON.stringify({ ok: false, message: 'Invalid password', ts: new Date().toISOString() }), { status: 401, headers });
       } catch {
-        return new Response(JSON.stringify({ ok: false, message: 'Invalid request format' }), { status: 400, headers: responseHeaders });
+        return new Response(JSON.stringify({ ok: false, message: 'Invalid request format' }), { status: 400, headers });
       }
     }
 
-    if (requestUrl.pathname === '/api/logout') {
-      return new Response(null, { status: 204, headers: { 'Set-Cookie': SESSION.clear(), 'Cache-Control': 'no-store', ...createCorsHeaders(requestOrigin), 'x-aa218-worker': 'logout' } });
+    if (url.pathname === '/api/logout') {
+      return new Response(null, { status: 204, headers: { 'Set-Cookie': SESSION.clear(), 'Cache-Control': 'no-store', ...createCorsHeaders(origin), 'x-aa218-worker': 'logout' } });
     }
 
-    if (requestUrl.pathname.startsWith('/api/')) {
-      const apiPath = requestUrl.pathname.replace(/^\/api\//, '');
+    if (url.pathname.startsWith('/api/')) {
+      const apiPath = url.pathname.replace(/^\/api\//, '');
       if (request.method === 'GET') {
-        const apiResponse = await azureApi.get(apiPath, { queryString: requestUrl.search.slice(1) });
-        const headers = new Headers({ 'Content-Type': apiResponse.headers?.get?.('content-type') || 'application/json', 'Cache-Control': 'no-store', ...createCorsHeaders(requestOrigin), 'x-aa218-worker': 'api-get' });
-        const body = apiResponse.data ?? apiResponse.raw ?? '';
-        return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: apiResponse.status || (apiResponse.ok ? 200 : 502), headers });
+        const ar = await azureApi.get(apiPath, { queryString: url.search.slice(1) });
+        const headers = new Headers({ 'Content-Type': ar.headers?.get?.('content-type') || 'application/json', 'Cache-Control': 'no-store', ...createCorsHeaders(origin), 'x-aa218-worker': 'api-get' });
+        const body = ar.data ?? ar.raw ?? '';
+        return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: ar.status || (ar.ok ? 200 : 502), headers });
       }
       if (request.method === 'POST') {
-        const requestBody = await request.arrayBuffer();
-        const postResponse = await azureApi.post(apiPath, { queryString: requestUrl.search.slice(1), body: requestBody, headers: { 'content-type': request.headers.get('content-type') || 'application/json' } });
-        const headers = new Headers({ 'Content-Type': postResponse.headers?.get?.('content-type') || 'application/json', 'Cache-Control': 'no-store', ...createCorsHeaders(requestOrigin), 'x-aa218-worker': 'api-post' });
-        const body = postResponse.data ?? postResponse.raw ?? '';
-        return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: postResponse.status || (postResponse.ok ? 200 : 502), headers });
+        const reqBody = await request.arrayBuffer();
+        const pr = await azureApi.post(apiPath, { queryString: url.search.slice(1), body: reqBody, headers: { 'content-type': request.headers.get('content-type') || 'application/json' } });
+        const headers = new Headers({ 'Content-Type': pr.headers?.get?.('content-type') || 'application/json', 'Cache-Control': 'no-store', ...createCorsHeaders(origin), 'x-aa218-worker': 'api-post' });
+        const body = pr.data ?? pr.raw ?? '';
+        return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: pr.status || (pr.ok ? 200 : 502), headers });
       }
-      return new Response('Method Not Allowed', { status: 405, headers: { ...createCorsHeaders(requestOrigin), 'x-aa218-worker': 'api-405' } });
+      return new Response('Method Not Allowed', { status: 405, headers: { ...createCorsHeaders(origin), 'x-aa218-worker': 'api-405' } });
     }
 
-    if (requestUrl.pathname === '/password.html' || requestUrl.pathname.startsWith('/password/')) {
+    const authParam = url.searchParams.get('auth');
+    if (authParam === 'test-true') {
+      const headers = new Headers({ 'Set-Cookie': SESSION.set('1'), 'Cache-Control': 'no-store', 'x-aa218-worker': 'auth-param-set' });
+      const clean = stripParam(url.toString(), 'auth');
+      headers.set('Location', clean);
+      return new Response(null, { status: 302, headers });
+    }
+    if (authParam === 'test-false') {
+      const headers = new Headers({ 'Set-Cookie': SESSION.clear(), 'Cache-Control': 'no-store', 'x-aa218-worker': 'auth-param-clear' });
+      const toPwd = `${url.origin}/password.html`;
+      return new Response(null, { status: 302, headers: { ...Object.fromEntries(headers), Location: toPwd } });
+    }
+
+    if (url.pathname === '/password.html' || url.pathname.startsWith('/password/')) {
       const upstream = await fetch(request);
       const r = new Response(upstream.body, upstream);
       r.headers.set('Cache-Control', 'private, no-store');
@@ -127,7 +143,7 @@ export default {
     }
 
     if (!hasSessionCookie(request, 'aa218_ok')) {
-      return new Response(null, { status: 302, headers: { Location: `${requestUrl.origin}/password.html`, 'Cache-Control': 'no-store', 'x-aa218-worker': 'redirected-to-password' } });
+      return new Response(null, { status: 302, headers: { Location: `${url.origin}/password.html`, 'Cache-Control': 'no-store', 'x-aa218-worker': 'redirected-to-password' } });
     }
 
     const upstream = await fetch(request);
