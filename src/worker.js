@@ -70,7 +70,13 @@ async function azureLogin(azure, args) {
   try { const g = await azure.get('pingfn', { queryString: args }); return g; }
   catch (e) {
     const s = e?.status ?? 0;
-    if (s === 404 || s === 405) return await azure.post('pingfn', { queryString: '', body: JSON.stringify(args), headers: { 'content-type': 'application/json' } });
+    if (s === 404 || s === 405) {
+      return await azure.post('pingfn', {
+        queryString: '',
+        body: JSON.stringify(args),
+        headers: { 'content-type': 'application/json' }
+      });
+    }
     throw e;
   }
 }
@@ -105,22 +111,44 @@ export default {
       return new Response(null, { status: 302, headers: h });
     }
 
-    // 3) Auth endpoints (unchanged)
+    // 3) Auth endpoints (UPDATED to include reason + response_azure)
     if (url.pathname === '/api/login' && method === 'POST') {
       const headers = new Headers({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors(origin) });
       const body = await parseBody(request);
       const pw = (body.password || '').toString().trim();
-      if (!pw) return new Response(JSON.stringify({ ok: false, message: 'Password is required' }), { status: 400, headers });
+
+      if (!pw) {
+        const payload = { ok: false, reason: 'Password missing', response_azure: null };
+        return new Response(JSON.stringify(payload), { status: 400, headers });
+      }
 
       const args = buildArgs(request, url); args.submittedPassword = pw;
+
       try {
         const res = await azureLogin(azure, args);
-        if (!ok2xx(res)) return new Response(JSON.stringify(res.data || { ok: false }), { status: res.status || 401, headers });
+        const azureShape = {
+          status: res?.status ?? 0,
+          ok: !!(res && res.status >= 200 && res.status < 300),
+          data: res?.data ?? null
+        };
+
+        if (!ok2xx(res)) {
+          const payload = { ok: false, reason: 'Azure denied credentials', response_azure: azureShape };
+          return new Response(JSON.stringify(payload), { status: res?.status || 401, headers });
+        }
+
         headers.set('Set-Cookie', SESSION.set('1'));
-        return new Response(JSON.stringify({ ok: true, ts: new Date().toISOString() }), { status: 200, headers });
+        const payload = { ok: true, reason: 'Login success', ts: new Date().toISOString(), response_azure: azureShape };
+        return new Response(JSON.stringify(payload), { status: 200, headers });
+
       } catch (e) {
         const status = e?.status || 502;
-        const payload = typeof e?.data === 'string' ? { ok: false, error: e.data } : (e?.data || { ok: false, message: 'Upstream error' });
+        const azureShape = {
+          status,
+          ok: false,
+          data: e?.data ?? (typeof e === 'string' ? e : null)
+        };
+        const payload = { ok: false, reason: 'Azure upstream error', response_azure: azureShape };
         return new Response(JSON.stringify(payload), { status, headers });
       }
     }
@@ -139,16 +167,28 @@ export default {
         if (method === 'GET') proxied = await azure.get(path, { queryString: url.search.slice(1) });
         else if (method === 'POST') {
           const buf = await request.arrayBuffer();
-          proxied = await azure.post(path, { queryString: url.search.slice(1), body: buf, headers: { 'content-type': request.headers.get('content-type') || 'application/json' } });
-        } else return new Response('Method Not Allowed', { status: 405, headers: { ...cors(origin) } });
+          proxied = await azure.post(path, {
+            queryString: url.search.slice(1),
+            body: buf,
+            headers: { 'content-type': request.headers.get('content-type') || 'application/json' }
+          });
+        } else {
+          return new Response('Method Not Allowed', { status: 405, headers: { ...cors(origin) } });
+        }
 
         const headers = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
         const ct = proxied.headers?.get?.('content-type'); if (ct) headers.set('Content-Type', ct);
         const data = proxied.data ?? proxied.raw ?? '';
-        return new Response(typeof data === 'string' ? data : JSON.stringify(data), { status: proxied.status || (proxied.ok ? 200 : 502), headers });
+        return new Response(typeof data === 'string' ? data : JSON.stringify(data), {
+          status: proxied.status || (proxied.ok ? 200 : 502),
+          headers
+        });
       } catch (e) {
         const status = e?.status || 502;
-        return new Response(JSON.stringify({ ok: false, message: 'Upstream error', status }), { status, headers: { ...cors(origin), 'Cache-Control': 'no-store', 'Content-Type': 'application/json' } });
+        return new Response(JSON.stringify({ ok: false, message: 'Upstream error', status }), {
+          status,
+          headers: { ...cors(origin), 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
+        });
       }
     }
 
@@ -166,7 +206,10 @@ export default {
 
     // 7) If no session: only redirect HTML navigations to /password.html
     if (!hasSession && isHtmlNav) {
-      return new Response(null, { status: 302, headers: { 'Location': `${url.origin}/password.html`, 'Cache-Control': 'no-store' } });
+      return new Response(null, {
+        status: 302,
+        headers: { 'Location': `${url.origin}/password.html`, 'Cache-Control': 'no-store' }
+      });
     }
 
     // 8) OPTIONAL: call Azure gate once (non-blocking) for telemetry; ignore failures
@@ -181,4 +224,3 @@ export default {
     return response;
   }
 };
-
