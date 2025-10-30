@@ -79,12 +79,18 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin') || '';
+    const accept = (request.headers.get('Accept') || '').toLowerCase();
+    const method = request.method;
+    const isHtmlNav = (method === 'GET' || method === 'HEAD') && accept.includes('text/html');
+
     const azure = new TecBaseApi({ functionsKey: env.AZ_FUNCTION_KEY, baseUrl: env.AZURE_BASE_URL });
 
-    if (url.pathname.startsWith('/api/') && request.method === 'OPTIONS') {
+    // 1) CORS preflight for API
+    if (url.pathname.startsWith('/api/') && method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: { ...cors(origin), 'Cache-Control': 'no-store' } });
     }
 
+    // 2) Manual test toggles (unchanged)
     const auth = url.searchParams.get('auth');
     if (auth === 'test-true') {
       const h = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
@@ -99,11 +105,13 @@ export default {
       return new Response(null, { status: 302, headers: h });
     }
 
-    if (url.pathname === '/api/login' && request.method === 'POST') {
+    // 3) Auth endpoints (unchanged)
+    if (url.pathname === '/api/login' && method === 'POST') {
       const headers = new Headers({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors(origin) });
       const body = await parseBody(request);
       const pw = (body.password || '').toString().trim();
       if (!pw) return new Response(JSON.stringify({ ok: false, message: 'Password is required' }), { status: 400, headers });
+
       const args = buildArgs(request, url); args.submittedPassword = pw;
       try {
         const res = await azureLogin(azure, args);
@@ -123,15 +131,17 @@ export default {
       return new Response(null, { status: 204, headers });
     }
 
+    // 4) API proxy passthrough (unchanged)
     if (url.pathname.startsWith('/api/')) {
       const path = url.pathname.replace(/^\/api\//, '');
       try {
         let proxied;
-        if (request.method === 'GET') proxied = await azure.get(path, { queryString: url.search.slice(1) });
-        else if (request.method === 'POST') {
+        if (method === 'GET') proxied = await azure.get(path, { queryString: url.search.slice(1) });
+        else if (method === 'POST') {
           const buf = await request.arrayBuffer();
           proxied = await azure.post(path, { queryString: url.search.slice(1), body: buf, headers: { 'content-type': request.headers.get('content-type') || 'application/json' } });
         } else return new Response('Method Not Allowed', { status: 405, headers: { ...cors(origin) } });
+
         const headers = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
         const ct = proxied.headers?.get?.('content-type'); if (ct) headers.set('Content-Type', ct);
         const data = proxied.data ?? proxied.raw ?? '';
@@ -142,6 +152,7 @@ export default {
       }
     }
 
+    // 5) Allow password page without session
     if (url.pathname === '/password.html' || url.pathname.startsWith('/password/')) {
       const upstream = await fetch(request);
       const r = new Response(upstream.body, upstream);
@@ -149,23 +160,25 @@ export default {
       return r;
     }
 
-    if (SESSION.has(request)) {
-      const upstream = await fetch(request);
-      const r = new Response(upstream.body, upstream);
-      r.headers.set('Cache-Control', 'private, no-store');
-      return r;
+    // 6) Session check (robust)
+    const cookie = request.headers.get('Cookie') || '';
+    const hasSession = SESSION.has?.(request) || cookie.includes('aa218_ok=');
+
+    // 7) If no session: only redirect HTML navigations to /password.html
+    if (!hasSession && isHtmlNav) {
+      return new Response(null, { status: 302, headers: { 'Location': `${url.origin}/password.html`, 'Cache-Control': 'no-store' } });
     }
 
-    try {
-      const gate = await azure.get('pingfn', { queryString: buildArgs(request, url) });
-      if (ok2xx(gate)) {
-        const upstream = await fetch(request);
-        const r = new Response(upstream.body, upstream);
-        r.headers.set('Cache-Control', 'private, no-store');
-        return r;
-      }
-    } catch {}
+    // 8) OPTIONAL: call Azure gate once (non-blocking) for telemetry; ignore failures
+    if (hasSession) {
+      try { await azure.get('pingfn', { queryString: buildArgs(request, url) }); } catch {}
+    }
 
-    return new Response(null, { status: 302, headers: { 'Location': `${url.origin}/password.html`, 'Cache-Control': 'no-store' } });
+    // 9) Fetch origin normally; always disable caching
+    const upstream = await fetch(request);
+    const response = new Response(upstream.body, upstream);
+    response.headers.set('Cache-Control', 'private, no-store');
+    return response;
   }
 };
+
