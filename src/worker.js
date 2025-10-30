@@ -1,8 +1,4 @@
-// worker.mjs — full file (re-coded as requested)
-// - Keeps your existing behavior
-// - /api/login now returns { ok, reason, response_azure, ts? }
-// - Adds response headers X-Reason and X-Azure-Status (exposed via CORS)
-// - Redirects HTML navigations without session to /password.html (unchanged intent)
+// worker.mjs — always returns JSON for /api/login (no blank bodies)
 
 import { TecBaseApi } from './TecBaseApi.js';
 import { TecCookie } from './TecCookie.js';
@@ -25,7 +21,8 @@ function cors(origin) {
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Allow-Credentials': 'true',
-    'Access-Control-Expose-Headers': 'X-Reason, X-Azure-Status',
+    // Expose debug headers in the browser:
+    'Access-Control-Expose-Headers': 'X-Reason, X-Azure-Status, X-Request-Id',
     'Vary': 'Origin'
   };
 }
@@ -92,6 +89,32 @@ async function azureLogin(azure, args) {
   }
 }
 
+// Utility: Always-JSON response constructor for /api/login
+function jsonLoginResponse(status, reason, payload = {}) {
+  const headers = new Headers({
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store'
+  });
+  // Fill in debug headers if provided in payload
+  if (payload.__origin) {
+    const c = cors(payload.__origin);
+    for (const [k, v] of Object.entries(c)) headers.set(k, v);
+  }
+  if (payload.__reason) headers.set('X-Reason', payload.__reason);
+  if (payload.__azureStatus != null) headers.set('X-Azure-Status', String(payload.__azureStatus));
+  if (payload.__reqId) headers.set('X-Request-Id', payload.__reqId);
+
+  // Build final body
+  const body = {
+    ok: status >= 200 && status < 300,
+    reason,
+    ts: new Date().toISOString(),
+    response_azure: payload.response_azure ?? null,
+    echo: payload.echo ?? null
+  };
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -102,12 +125,12 @@ export default {
 
     const azure = new TecBaseApi({ functionsKey: env.AZ_FUNCTION_KEY, baseUrl: env.AZURE_BASE_URL });
 
-    // 1) CORS preflight for API
+    // Preflight for API
     if (url.pathname.startsWith('/api/') && method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: { ...cors(origin), 'Cache-Control': 'no-store' } });
     }
 
-    // 2) Manual test toggles
+    // Manual test toggles
     const auth = url.searchParams.get('auth');
     if (auth === 'test-true') {
       const h = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
@@ -122,78 +145,91 @@ export default {
       return new Response(null, { status: 302, headers: h });
     }
 
-    // 3) Auth endpoints (reason + response_azure + debug headers)
+    // ======= HARDENED /api/login: ALWAYS RETURNS JSON BODY =======
     if (url.pathname === '/api/login' && method === 'POST') {
-      const headers = new Headers({
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        ...cors(origin)
-      });
-
-      let bodyJson = {};
+      const reqId = crypto.randomUUID?.() || String(Date.now());
       try {
-        bodyJson = await parseBody(request);
-      } catch {
-        const payload = { ok: false, reason: 'Body parse failed', response_azure: null };
-        headers.set('X-Reason', 'Body parse failed');
-        headers.set('X-Azure-Status', '0');
-        return new Response(JSON.stringify(payload), { status: 400, headers });
-      }
+        let bodyJson = {};
+        try { bodyJson = await parseBody(request); }
+        catch {
+          return jsonLoginResponse(400, 'Body parse failed', {
+            __origin: origin, __reason: 'Body parse failed', __azureStatus: 0, __reqId: reqId,
+            echo: null
+          });
+        }
 
-      const pw = (bodyJson.password || '').toString().trim();
-      if (!pw) {
-        const payload = { ok: false, reason: 'Password missing', response_azure: null };
-        headers.set('X-Reason', 'Password missing');
-        headers.set('X-Azure-Status', '0');
-        return new Response(JSON.stringify(payload), { status: 400, headers });
-      }
+        const pw = (bodyJson.password || '').toString().trim();
+        if (!pw) {
+          return jsonLoginResponse(400, 'Password missing', {
+            __origin: origin, __reason: 'Password missing', __azureStatus: 0, __reqId: reqId,
+            echo: bodyJson
+          });
+        }
 
-      const args = buildArgs(request, url);
-      args.submittedPassword = pw;
+        const args = buildArgs(request, url);
+        args.submittedPassword = pw;
 
-      try {
-        const res = await azureLogin(azure, args);
+        let res;
+        try {
+          res = await azureLogin(azure, args);
+        } catch (e) {
+          const status = e?.status || 502;
+          const azureShape = { status, ok: false, data: e?.data ?? (typeof e === 'string' ? e : null) };
+          return jsonLoginResponse(status, 'Azure upstream error', {
+            __origin: origin, __reason: 'Azure upstream error', __azureStatus: status, __reqId: reqId,
+            response_azure: azureShape, echo: bodyJson
+          });
+        }
+
         const azureShape = {
           status: res?.status ?? 0,
-          ok: !!(res && res.status >= 200 && res.status < 300),
+          ok: ok2xx(res),
           data: res?.data ?? null
         };
 
         if (!ok2xx(res)) {
-          const payload = { ok: false, reason: 'Azure denied credentials', response_azure: azureShape };
-          headers.set('X-Reason', 'Azure denied credentials');
-          headers.set('X-Azure-Status', String(azureShape.status || 0));
-          return new Response(JSON.stringify(payload), { status: res?.status || 401, headers });
+          return jsonLoginResponse(res?.status || 401, 'Azure denied credentials', {
+            __origin: origin, __reason: 'Azure denied credentials', __azureStatus: azureShape.status || 0, __reqId: reqId,
+            response_azure: azureShape, echo: bodyJson
+          });
         }
 
+        // Success → set cookie + JSON body
+        const headers = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
         headers.set('Set-Cookie', SESSION.set('1'));
-        const payload = {
+        headers.set('Content-Type', 'application/json; charset=utf-8');
+        headers.set('X-Reason', 'Login success');
+        headers.set('X-Azure-Status', String(azureShape.status || 200));
+        headers.set('X-Request-Id', reqId);
+
+        const body = {
           ok: true,
           reason: 'Login success',
           ts: new Date().toISOString(),
-          response_azure: azureShape
+          response_azure: azureShape,
+          echo: bodyJson
         };
-        headers.set('X-Reason', 'Login success');
-        headers.set('X-Azure-Status', String(azureShape.status || 200));
-        return new Response(JSON.stringify(payload), { status: 200, headers });
+        return new Response(JSON.stringify(body), { status: 200, headers });
 
-      } catch (e) {
-        const status = e?.status || 502;
-        const azureShape = { status, ok: false, data: e?.data ?? (typeof e === 'string' ? e : null) };
-        const payload = { ok: false, reason: 'Azure upstream error', response_azure: azureShape };
-        headers.set('X-Reason', 'Azure upstream error');
-        headers.set('X-Azure-Status', String(status));
-        return new Response(JSON.stringify(payload), { status, headers });
+      } catch (fatal) {
+        // Top-level guard: even if something unexpected explodes, send JSON
+        const status = 500;
+        return jsonLoginResponse(status, 'Worker fatal error', {
+          __origin: origin, __reason: 'Worker fatal error', __azureStatus: status, __reqId: reqId,
+          echo: null
+        });
       }
     }
+    // ======= END /api/login =======
 
+    // /api/logout
     if (url.pathname === '/api/logout') {
       const headers = new Headers({ ...cors(origin), 'Cache-Control': 'no-store' });
       headers.set('Set-Cookie', SESSION.clear());
       return new Response(null, { status: 204, headers });
     }
 
-    // 4) API proxy passthrough
+    // API proxy passthrough
     if (url.pathname.startsWith('/api/')) {
       const path = url.pathname.replace(/^\/api\//, '');
       try {
@@ -228,7 +264,7 @@ export default {
       }
     }
 
-    // 5) Allow password page without session
+    // Allow password page without session
     if (url.pathname === '/password.html' || url.pathname.startsWith('/password/')) {
       const upstream = await fetch(request);
       const r = new Response(upstream.body, upstream);
@@ -236,7 +272,7 @@ export default {
       return r;
     }
 
-    // 6) Session check
+    // Session gate for HTML navigations only
     const cookie = request.headers.get('Cookie') || '';
     const hasSession = (typeof SESSION.has === 'function' ? SESSION.has(request) : cookie.includes('aa218_ok='));
     if (!hasSession && isHtmlNav) {
@@ -246,12 +282,10 @@ export default {
       });
     }
 
-    // 7) Optional telemetry (ignore failures)
-    if (hasSession) {
-      try { await azure.get('pingfn', { queryString: buildArgs(request, url) }); } catch {}
-    }
+    // Optional telemetry (non-blocking)
+    if (hasSession) { try { await azure.get('pingfn', { queryString: buildArgs(request, url) }); } catch {} }
 
-    // 8) Pass-through for everything else
+    // Pass-through for everything else
     const upstream = await fetch(request);
     const response = new Response(upstream.body, upstream);
     response.headers.set('Cache-Control', 'private, no-store');
