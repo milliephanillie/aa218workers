@@ -73,20 +73,16 @@ function ok2xx(res) {
 }
 
 async function azureLogin(azure, args) {
-  try {
-    const g = await azure.get('pingfn', { queryString: args });
-    return g;
-  } catch (e) {
-    const s = e?.status ?? 0;
-    if (s === 404 || s === 405) {
-      return await azure.post('pingfn', {
-        queryString: '',
-        body: JSON.stringify(args),
-        headers: { 'content-type': 'application/json' }
-      });
+  // Use the sneakin endpoint with philliepass header for password authentication
+  const password = args.submittedPassword;
+  return await azure.post('sneakin', {
+    queryString: '',
+    body: JSON.stringify(args),
+    headers: { 
+      'content-type': 'application/json',
+      'philliepass': password
     }
-    throw e;
-  }
+  });
 }
 
 // Utility: Always-JSON response constructor for /api/login

@@ -5,6 +5,10 @@ compatibility_date = "2024-10-01"
 # Optional: test on workers.dev too
 # workers_dev = true
 
+# Environment variables
+[vars]
+AZURE_BASE_URL = "https://218functionapp-c5ctf2ggfjcwdbax.centralus-01.azurewebsites.net/api/pingfn"
+
 [observability]
   head_sampling_rate = 1
   [observability.logs]
@@ -12,3 +16,4 @@ compatibility_date = "2024-10-01"
     head_sampling_rate = 1
     invocation_logs = true
     persist = true
+
