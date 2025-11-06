@@ -104,6 +104,7 @@ function jsonLoginResponse(status, reason, payload = {}) {
   const body = {
     ok: status >= 200 && status < 300,
     reason,
+    request_azure: payload.request_azure ?? null,
     ts: new Date().toISOString(),
     response_azure: payload.response_azure ?? null,
     echo: payload.echo ?? null
@@ -150,7 +151,7 @@ export default {
         catch {
           return jsonLoginResponse(400, 'Body parse failed', {
             __origin: origin, __reason: 'Body parse failed', __azureStatus: 0, __reqId: reqId,
-            echo: null
+            request_azure: null, echo: null
           });
         }
 
@@ -158,12 +159,25 @@ export default {
         if (!pw) {
           return jsonLoginResponse(400, 'Password missing', {
             __origin: origin, __reason: 'Password missing', __azureStatus: 0, __reqId: reqId,
-            echo: bodyJson
+            request_azure: null, echo: bodyJson
           });
         }
 
         const args = buildArgs(request, url);
         args.submittedPassword = pw;
+
+        // Build request details for debugging
+        const requestDetails = {
+          method: 'POST',
+          endpoint: 'sneakin',
+          url: `${env.AZURE_BASE_URL}/api/sneakin`,
+          headers: {
+            'content-type': 'application/json',
+            'philliepass': pw,
+            'x-functions-key': '[REDACTED]'
+          },
+          body: args
+        };
 
         let res;
         try {
@@ -173,7 +187,7 @@ export default {
           const azureShape = { status, ok: false, data: e?.data ?? (typeof e === 'string' ? e : null) };
           return jsonLoginResponse(status, 'Azure upstream error', {
             __origin: origin, __reason: 'Azure upstream error', __azureStatus: status, __reqId: reqId,
-            response_azure: azureShape, echo: bodyJson
+            request_azure: requestDetails, response_azure: azureShape, echo: bodyJson
           });
         }
 
@@ -186,7 +200,7 @@ export default {
         if (!ok2xx(res)) {
           return jsonLoginResponse(res?.status || 401, 'Azure denied credentials', {
             __origin: origin, __reason: 'Azure denied credentials', __azureStatus: azureShape.status || 0, __reqId: reqId,
-            response_azure: azureShape, echo: bodyJson
+            request_azure: requestDetails, response_azure: azureShape, echo: bodyJson
           });
         }
 
@@ -201,6 +215,7 @@ export default {
         const body = {
           ok: true,
           reason: 'Login success',
+          request_azure: requestDetails,
           ts: new Date().toISOString(),
           response_azure: azureShape,
           echo: bodyJson
@@ -212,7 +227,7 @@ export default {
         const status = 500;
         return jsonLoginResponse(status, 'Worker fatal error', {
           __origin: origin, __reason: 'Worker fatal error', __azureStatus: status, __reqId: reqId,
-          echo: null
+          request_azure: null, echo: null
         });
       }
     }
