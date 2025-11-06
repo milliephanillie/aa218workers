@@ -7,7 +7,7 @@ compatibility_date = "2024-10-01"
 
 # Environment variables
 [vars]
-AZURE_BASE_URL = "https://218functionapp-c5ctf2ggfjcwdbax.centralus-01.azurewebsites.net/api/pingfn"
+AZURE_BASE_URL = "https://218functionapp-c5ctf2ggfjcwdbax.centralus-01.azurewebsites.net/api/sneakin"
 
 [observability]
   head_sampling_rate = 1
