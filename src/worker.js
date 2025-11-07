@@ -2,7 +2,7 @@
 
 import { TecBaseApi } from './TecBaseApi.js';
 import { TecCookie } from './TecCookie.js';
-import { twilioMainMenu, twilioHandleLanguage } from './TecTwilio.js';
+import { TecTwilio } from './TecTwilio.js'
 
 const SESSION = new TecCookie({
   name: 'aa218_ok',
