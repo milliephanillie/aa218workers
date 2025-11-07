@@ -122,6 +122,14 @@ export default {
 
     const azure = new TecBaseApi({ functionsKey: env.AZ_FUNCTION_KEY, baseUrl: env.AZURE_BASE_URL });
 
+    if (url.pathname === '/twilio/main-menu') {
+      return TecTwilio.mainMenu();
+    }
+
+    if (url.pathname === '/twilio/handle-language' && method === 'POST') {
+      return await TecTwilio.handleLanguage(request);
+    }
+
     // Preflight for API
     if (url.pathname.startsWith('/api/') && method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: { ...cors(origin), 'Cache-Control': 'no-store' } });
